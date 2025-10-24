@@ -14,17 +14,16 @@ def order_points(pts):
 
 def find_document_contour(image):
     """
-    CORREÇÃO: Ajuste fino no Canny e filtro de proporção (aspect ratio) 
-    para focar no documento impresso e ignorar a caligrafia.
+    ✅ CORREÇÃO: Ajustes para incluir a área de caligrafia.
+    Remove filtros de proporção e ajusta Canny/Blur/Epsilon.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # 1. Blur ligeiramente maior para tentar ignorar a caligrafia fina (7x7)
-    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+    # 1. Blur um pouco mais leve (5x5) para tentar pegar as bordas da caligrafia
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # 2. Canny para detecção de bordas
-    # Ajustando os thresholds para 40, 120 (menos sensível)
-    edges = cv2.Canny(blurred, 40, 120, apertureSize=3)
+    # 2. Canny para detecção de bordas (thresholds mais abertos para caligrafia)
+    edges = cv2.Canny(blurred, 30, 100, apertureSize=3) # Ajustado para ser mais sensível
     
     # 3. Encontra contornos (TODOS ELES)
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE) 
@@ -41,35 +40,22 @@ def find_document_contour(image):
     for cnt in contours[:20]: 
         area = cv2.contourArea(cnt)
         
-        # Filtro de área
         if area < img_area * 0.10: 
             break
         
         peri = cv2.arcLength(cnt, True)
         
-        # 6. Tenta aproximar para um polígono (epsilon 3% - flexível)
-        approx = cv2.approxPolyDP(cnt, 0.03 * peri, True) 
+        # 6. Tenta aproximar para um polígono (epsilon aumentado para 4-5% - mais flexível)
+        approx = cv2.approxPolyDP(cnt, 0.04 * peri, True) # Aumentado para 4%
         
-        # 7. É um quadrilátero convexo?
+        # 7. É um quadrilátero convexo? (Remover filtro de aspecto aqui)
         if len(approx) == 4 and cv2.isContourConvex(approx):
-            
-            # --- FILTRO DE PROPORÇÃO (CRUCIAL PARA IGNORAR CALIGRAFIA) ---
-            # Verifica se o contorno tem proporção de documento (altura > largura)
-            x, y, w_cnt, h_cnt = cv2.boundingRect(approx)
-            aspect_ratio = float(w_cnt) / h_cnt
-            
-            # O documento é vertical. Esperamos que w/h < 1 (ex: 0.70 para A4)
-            # Se a caligrafia fosse pega, o contorno seria mais largo, aumentando w/h
-            if aspect_ratio < 1.05 and h_cnt > w_cnt: 
-                 print(f"Contorno aceito: Aspect Ratio {aspect_ratio:.2f}")
-                 return approx.reshape(4, 2).astype("float32")
-            else:
-                 print(f"Contorno rejeitado (Proporção): Aspect Ratio {aspect_ratio:.2f}")
+            print(f"✓ Contorno aceito. Área: {area}")
+            return approx.reshape(4, 2).astype("float32")
 
     print("⚠️ Não foi encontrado nenhum contorno de 4 lados adequado. Tentando Fallback.")
     
-    # --- FALLBACK: Usar Morfologia, que pega o contorno maior (provavelmente o papel + caligrafia) ---
-    # Manteremos este, pois é melhor do que não encontrar nada.
+    # --- FALLBACK: Usar Morfologia, que pega o contorno maior ---
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
     dilated = cv2.dilate(closed, kernel, iterations=2)
@@ -83,7 +69,7 @@ def find_document_contour(image):
     approx_fb = cv2.approxPolyDP(cnt_fb, 0.02 * peri_fb, True)
     
     if len(approx_fb) == 4:
-        print("Usando contorno Fallback.")
+        print("Usando contorno Fallback (com morfologia).")
         return approx_fb.reshape(4, 2).astype("float32")
 
     return None
@@ -119,7 +105,7 @@ def enhance_document(image):
 def process_image(image):
     """
     Digitalizador que detecta, corrige perspectiva e enquadra documentos.
-    CORREÇÃO CRUCIAL: Redução da margem para evitar o corte lateral.
+    CORREÇÃO: Margem ajustada para evitar corte lateral enquanto inclui a caligrafia.
     """
     orig = image.copy()
     h, w = image.shape[:2]
@@ -144,8 +130,8 @@ def process_image(image):
     pts = order_points(doc_contour_orig)
     (tl, tr, br, bl) = pts
     
-    # REDUÇÃO CRUCIAL DA MARGEM (de 30 para 20)
-    margin = 20 
+    # MARGEM AJUSTADA: 25px é um bom meio-termo
+    margin = 25 
     
     widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
     widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
@@ -175,7 +161,6 @@ def process_image(image):
 
 # --- Funções de Debug (Manter) ---
 def draw_contour_debug(image, contour_points, color=(0, 255, 0), thickness=3, show_corners=True):
-    # ... (código da função draw_contour_debug)
     debug_img = image.copy()
     if contour_points is not None:
         pts = np.int32(contour_points)
@@ -189,7 +174,6 @@ def draw_contour_debug(image, contour_points, color=(0, 255, 0), thickness=3, sh
     return debug_img
 
 def scan_document(input_path, output_path=None, show_debug=False):
-    # ... (código da função scan_document)
     image = cv2.imread(input_path)
     if image is None:
         print(f"❌ Erro ao carregar: {input_path}")
@@ -197,15 +181,12 @@ def scan_document(input_path, output_path=None, show_debug=False):
     
     print(f"📄 Processando: {input_path}")
     
-    # --- Processamento e Debug ---
     result = process_image(image)
     
-    # Salva resultado
     if output_path:
         cv2.imwrite(output_path, result, [cv2.IMWRITE_JPEG_QUALITY, 95])
         print(f"💾 Salvo em: {output_path}")
     
-    # Mostra debug se solicitado
     if show_debug:
         temp_h, temp_w = image.shape[:2]
         max_dim_debug = 800
@@ -231,6 +212,9 @@ def scan_document(input_path, output_path=None, show_debug=False):
 
 
 # --- COMO USAR ---
-# arquivo_entrada = 'documento.jpg' 
-# arquivo_saida = 'documento_digitalizado_final_v3.jpg'
-# scan_document(arquivo_entrada, arquivo_saida, show_debug=True)
+# 1. Certifique-se de que a imagem original está salva como 'documento.jpg'
+arquivo_entrada = 'documento.jpg' 
+arquivo_saida = 'documento_digitalizado_caligrafia_final.jpg'
+
+# 2. Execute com show_debug=True para ver o contorno detectado
+scan_document(arquivo_entrada, arquivo_saida, show_debug=True)
