@@ -31,12 +31,36 @@ if uploaded_file:
     img_pil.save(img_byte_arr, format="PNG")
     img_byte_arr.seek(0)
 
+    from reportlab.lib.utils import ImageReader
+    
+    # Cria o PDF
     c = canvas.Canvas(pdf_buffer, pagesize=A4)
-    width, height = A4
-    img = ImageReader(img_byte_arr)
-    c.drawImage(img, 0, 0, width, height)
+    page_width, page_height = A4
+    
+    # Converte imagem processada
+    img_pil = Image.fromarray(processed)
+    img_width, img_height = img_pil.size
+    aspect_ratio = img_width / img_height
+    
+    # Ajusta tamanho para caber na página mantendo proporção
+    max_width = page_width - 40  # margens
+    max_height = page_height - 40
+    if img_width > img_height:
+        render_width = max_width
+        render_height = render_width / aspect_ratio
+    else:
+        render_height = max_height
+        render_width = render_height * aspect_ratio
+    
+    # Centraliza a imagem na página
+    x = (page_width - render_width) / 2
+    y = (page_height - render_height) / 2
+    
+    # Desenha a imagem
+    img = ImageReader(img_pil)
+    c.drawImage(img, x, y, render_width, render_height, preserveAspectRatio=True, anchor='c')
+    c.showPage()
     c.save()
-    pdf_buffer.seek(0)
 
     st.download_button(
         label="📥 Baixar PDF",
