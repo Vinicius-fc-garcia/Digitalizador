@@ -14,7 +14,7 @@ def process_image(image):
     if max(h, w) > max_dim:
         scale = max_dim / max(h, w)
         image_resized = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        ratio = 1 / scale
+        ratio = scale  # ✅ Corrigido: não inverta o ratio
     else:
         image_resized = image.copy()
         ratio = 1.0
@@ -30,7 +30,7 @@ def process_image(image):
         return orig
     
     # Ajusta para escala original
-    doc_contour = doc_contour * ratio
+    doc_contour = doc_contour / ratio  # ✅ Corrigido
     
     # Ordena os pontos
     pts = order_points(doc_contour)
@@ -55,6 +55,7 @@ def process_image(image):
     ], dtype="float32")
     
     # Aplica transformação de perspectiva
+    pts = order_points(pts)  # ✅ Garante ordem correta antes da transformação
     M = cv2.getPerspectiveTransform(pts, dst)
     warped = cv2.warpPerspective(orig, M, (maxWidth, maxHeight))
     
