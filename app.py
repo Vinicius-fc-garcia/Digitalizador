@@ -31,19 +31,29 @@ if uploaded_file:
     img_pil.save(img_byte_arr, format="PNG")
     img_byte_arr.seek(0)
 
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
     from reportlab.lib.utils import ImageReader
+    import io
     
-    # Cria o PDF
+    # Converter imagem processada para bytes
+    img_pil = Image.fromarray(processed)
+    img_bytes = io.BytesIO()
+    img_pil.save(img_bytes, format='JPEG')
+    img_bytes.seek(0)
+    
+    # Criação do PDF
+    pdf_buffer = io.BytesIO()
     c = canvas.Canvas(pdf_buffer, pagesize=A4)
     page_width, page_height = A4
     
-    # Converte imagem processada
-    img_pil = Image.fromarray(processed)
+    # Medidas da imagem e proporção
+    img = ImageReader(img_bytes)
     img_width, img_height = img_pil.size
     aspect_ratio = img_width / img_height
     
-    # Ajusta tamanho para caber na página mantendo proporção
-    max_width = page_width - 40  # margens
+    # Ajustar proporção à página
+    max_width = page_width - 40
     max_height = page_height - 40
     if img_width > img_height:
         render_width = max_width
@@ -52,15 +62,23 @@ if uploaded_file:
         render_height = max_height
         render_width = render_height * aspect_ratio
     
-    # Centraliza a imagem na página
+    # Centralizar na página
     x = (page_width - render_width) / 2
     y = (page_height - render_height) / 2
     
-    # Desenha a imagem
-    img = ImageReader(img_pil)
-    c.drawImage(img, x, y, render_width, render_height, preserveAspectRatio=True, anchor='c')
+    # Desenhar imagem e salvar
+    c.drawImage(img, x, y, render_width, render_height)
     c.showPage()
     c.save()
+    
+    pdf_buffer.seek(0)
+    
+    st.download_button(
+        label="📥 Baixar PDF",
+        data=pdf_buffer,
+        file_name="documento_digitalizado.pdf",
+        mime="application/pdf",
+    )
 
     st.download_button(
         label="📥 Baixar PDF",
