@@ -4,7 +4,7 @@ import numpy as np
 def process_image(image):
     """
     Digitalizador que detecta, corrige perspectiva e enquadra documentos.
-    Otimizado para manter detalhes (escala de cinza) e corrigir o cropping.
+    CORREÇÃO CRUCIAL: Aumento da margem para evitar o corte do rodapé.
     """
     orig = image.copy()
     h, w = image.shape[:2]
@@ -35,14 +35,14 @@ def process_image(image):
     # --- 4. Calcula as dimensões do documento retificado ---
     (tl, tr, br, bl) = pts
     
-    # Adiciona uma pequena margem (ajuste crucial para compensar a borda do papel)
-    margin = 10
+    # AUMENTO CRUCIAL DA MARGEM (de 10 para 30)
+    margin = 30 
     
     widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
     widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
     maxWidth = max(int(widthA), int(widthB)) + 2 * margin
     
-    heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+    heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - bl[1]) ** 2))
     heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
     maxHeight = max(int(heightA), int(heightB)) + 2 * margin
     
@@ -61,7 +61,7 @@ def process_image(image):
     # --- 7. Pós-processamento para melhorar qualidade (escala de cinza, alto detalhe) ---
     warped = enhance_document(warped)
     
-    print(f"✓ Documento digitalizado: {maxWidth}x{maxHeight}px")
+    print(f"✓ Documento digitalizado: {maxWidth}x{maxHeight}px (Margem de {margin}px aplicada)")
     return warped
 
 
@@ -141,8 +141,7 @@ def order_points(pts):
 
 def enhance_document(image):
     """
-    ✅ CORRIGIDO: Otimizado para Escala de Cinza com Alto Detalhe.
-    Foca em remoção de sombra e contraste, evitando binarização pura (serrilhamento).
+    CORREÇÃO FINAL: Aumenta ligeiramente a nitidez e contraste para dar 'pop' ao texto.
     """
     
     # Converte para escala de cinza
@@ -155,23 +154,21 @@ def enhance_document(image):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (30, 30))
     background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
     
-    # Normaliza a iluminação
     normalized = cv2.divide(gray, background, scale=255)
     normalized = cv2.normalize(normalized, None, 0, 255, cv2.NORM_MINMAX)
     
     # --- 2. Ajuste de Contraste (CLAHE) ---
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8)) # Aumenta clipLimit para 4.0
     normalized = clahe.apply(normalized)
     
-    # --- 3. Nitidez Suave (Unsharp Mask) ---
-    # Parâmetros mais suaves para evitar o serrilhamento
-    gaussian = cv2.GaussianBlur(normalized, (0, 0), 1.0) # Sigma menor
-    sharpened = cv2.addWeighted(normalized, 1.5, gaussian, -0.5, 0) # Pesos menores
+    # --- 3. Nitidez (Unsharp Mask) ---
+    # Parâmetros ligeiramente mais agressivos que a última versão para mais clareza
+    gaussian = cv2.GaussianBlur(normalized, (0, 0), 1.0)
+    sharpened = cv2.addWeighted(normalized, 1.8, gaussian, -0.8, 0) # Aumenta pesos de nitidez
     
     # --- 4. Ajuste Final de Brilho/Contraste ---
-    enhanced = cv2.convertScaleAbs(sharpened, alpha=1.1, beta=5) # Ajuste sutil
+    enhanced = cv2.convertScaleAbs(sharpened, alpha=1.1, beta=10) # Aumenta beta para 10
     
-    # Converte de volta para BGR (3 canais) para consistência
     return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
 
