@@ -14,7 +14,7 @@ def process_image(image):
     if max(h, w) > max_dim:
         scale = max_dim / max(h, w)
         image_resized = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        ratio = scale  # ✅ Corrigido: não inverta o ratio
+        ratio = scale
     else:
         image_resized = image.copy()
         ratio = 1.0
@@ -23,39 +23,56 @@ def process_image(image):
     doc_contour = find_document_contour(image_resized)
     
     if doc_contour is None:
-        debug_img = draw_contour_debug(image_resized, doc_contour)
-        cv2.imshow("Contorno Detectado", debug_img)
-        cv2.waitKey(0)
-        print("⚠️ Não foi possível detectar o documento")
-        return orig
-    
-    # Ajusta para escala original
-    doc_contour = doc_contour / ratio  # ✅ Corrigido
-    
-    # Ordena os pontos
-    pts = order_points(doc_contour)
-    
-    # Calcula as dimensões do documento retificado
-    (tl, tr, br, bl) = pts
-    
-    widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-    widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
-    maxWidth = max(int(widthA), int(widthB))
-    
-    heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-    heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
-    maxHeight = max(int(heightA), int(heightB))
-    
-    # Destino retangular
-    dst = np.array([
-        [0, 0],
-        [maxWidth - 1, 0],
-        [maxWidth - 1, maxHeight - 1],
-        [0, maxHeight - 1]
-    ], dtype="float32")
-    
+        # Tenta usar a imagem inteira como fallback se nada for detectado
+        print("⚠️ Não foi possível detectar o documento, usando imagem inteira.")
+        pts = np.array([
+            [0, 0],
+            [w - 1, 0],
+            [w - 1, h - 1],
+            [0, h - 1]
+        ], dtype="float32")
+        
+        # Calcula dimensões
+        maxWidth = w
+        maxHeight = h
+        
+        # Define destino
+        dst = np.array([
+            [0, 0],
+            [maxWidth - 1, 0],
+            [maxWidth - 1, maxHeight - 1],
+            [0, maxHeight - 1]
+        ], dtype="float32")
+
+    else:
+        # Se detectou, ajusta para escala original
+        doc_contour = doc_contour / ratio
+        
+        # Ordena os pontos
+        pts = order_points(doc_contour)
+        
+        # Calcula as dimensões do documento retificado
+        (tl, tr, br, bl) = pts
+        
+        widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+        widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+        maxWidth = max(int(widthA), int(widthB))
+        
+        heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+        heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+        maxHeight = max(int(heightA), int(heightB))
+        
+        # Destino retangular
+        dst = np.array([
+            [0, 0],
+            [maxWidth - 1, 0],
+            [maxWidth - 1, maxHeight - 1],
+            [0, maxHeight - 1]
+        ], dtype="float32")
+
     # Aplica transformação de perspectiva
-    pts = order_points(pts)  # ✅ Garante ordem correta antes da transformação
+    # A linha 'pts = order_points(pts)' foi REMOVIDA daqui pois era redundante.
+    # 'pts' já foi ordenado logo após a detecção do contorno.
     M = cv2.getPerspectiveTransform(pts, dst)
     warped = cv2.warpPerspective(orig, M, (maxWidth, maxHeight))
     
@@ -83,18 +100,14 @@ def find_document_contour(image):
     # --- Método 1: Threshold Adaptativo ---
     thresh1 = cv2.adaptiveThreshold(
         blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, 11, 2
+        cv2.THRESH_BINARY_INV, 21, 5 # Invertido para bordas brancas
     )
     
-    # --- Método 2: Otsu ---
-    _, thresh2 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # --- Método 3: Canny ---
+    # --- Método 2: Canny ---
     edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
     
     # Combina os métodos
-    combined = cv2.bitwise_or(thresh1, thresh2)
-    combined = cv2.bitwise_or(combined, edges)
+    combined = cv2.bitwise_or(thresh1, edges)
     
     # Operações morfológicas para conectar bordas
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
@@ -116,7 +129,7 @@ def find_document_contour(image):
     img_area = image.shape[0] * image.shape[1]
     
     # Procura o melhor contorno retangular
-    for cnt in contours[:5]:  # Testa os 5 maiores
+    for cnt in contours[:5]: # Testa os 5 maiores
         area = cv2.contourArea(cnt)
         
         # Deve ter pelo menos 15% da área da imagem
@@ -157,54 +170,84 @@ def order_points(pts):
     
     # Soma de coordenadas
     s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]      # top-left
-    rect[2] = pts[np.argmax(s)]      # bottom-right
+    rect[0] = pts[np.argmin(s)]     # top-left
+    rect[2] = pts[np.argmax(s)]     # bottom-right
     
-    # Diferença de coordenadas
+    # Diferença de coordenadas (y - x)
     diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]   # top-right
-    rect[3] = pts[np.argmax(diff)]   # bottom-left
+    rect[1] = pts[np.argmin(diff)]  # top-right
+    rect[3] = pts[np.argmax(diff)]  # bottom-left
     
     return rect
 
 
 def enhance_document(image):
     """
-    Melhora a qualidade do documento digitalizado.
+    ✅ CORRIGIDO: Melhora a qualidade do documento digitalizado.
     Remove sombras, aumenta contraste e nitidez.
+    Agora preserva a cor se o original for colorido.
     """
-    # Converte para escala de cinza
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Se for colorido, processa o canal de Luminosidade (L)
+    if len(image.shape) == 3 and image.shape[2] == 3:
+        # Converte para LAB
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        
+        # Remove sombras do canal L
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
+        background = cv2.morphologyEx(l, cv2.MORPH_CLOSE, kernel)
+        l_normalized = cv2.divide(l, background, scale=255)
+        
+        # Aumenta contraste do canal L
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        l_enhanced = clahe.apply(l_normalized)
+        
+        # Mescla canais de volta
+        merged = cv2.merge((l_enhanced, a, b))
+        enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+        
+        # Aplica nitidez na imagem colorida
+        gaussian = cv2.GaussianBlur(enhanced, (0, 0), 2.0)
+        sharpened = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0)
+        
+        # Ajuste final de brilho/contraste
+        final = cv2.convertScaleAbs(sharpened, alpha=1.1, beta=2)
+        
+        # --- OPÇÃO PARA IMPRESSÃO (PRETO E BRANCO) ---
+        # Descomente as 3 linhas abaixo para P&B de alto contraste
+        # print("Convertendo para P&B de alto contraste para impressão.")
+        # gray_final = cv2.cvtColor(final, cv2.COLOR_BGR2GRAY)
+        # _, final_bw = cv2.threshold(gray_final, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # final = cv2.cvtColor(final_bw, cv2.COLOR_GRAY2BGR) # Converte de volta para 3 canais
+            
+        return final
+        
     else:
+        # Se já for P&B, usa a lógica antiga
         gray = image.copy()
-    
-    # Remove sombras usando morphological transformation
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
-    background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-    
-    # Divide a imagem pelo fundo para normalizar iluminação
-    normalized = cv2.divide(gray, background, scale=255)
-    
-    # Aumenta contraste
-    normalized = cv2.normalize(normalized, None, 0, 255, cv2.NORM_MINMAX)
-    
-    # Threshold adaptativo para binarizar (opcional, comentado por padrão)
-    # Se quiser documento completamente preto e branco, descomente:
-    # normalized = cv2.adaptiveThreshold(
-    #     normalized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-    #     cv2.THRESH_BINARY, 11, 10
-    # )
-    
-    # Aplica unsharp mask para aumentar nitidez
-    gaussian = cv2.GaussianBlur(normalized, (0, 0), 2.0)
-    sharpened = cv2.addWeighted(normalized, 1.5, gaussian, -0.5, 0)
-    
-    # Ajusta brilho e contraste final
-    enhanced = cv2.convertScaleAbs(sharpened, alpha=1.2, beta=5)
-    
-    # Converte de volta para BGR
-    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+        if len(gray.shape) == 3:
+            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+            
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
+        background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+        normalized = cv2.divide(gray, background, scale=255)
+        normalized = cv2.normalize(normalized, None, 0, 255, cv2.NORM_MINMAX)
+        
+        # --- OPÇÃO PARA IMPRESSÃO (PRETO E BRANCO) ---
+        # Descomente para P&B de alto contraste
+        # print("Convertendo para P&B de alto contraste para impressão.")
+        # normalized = cv2.adaptiveThreshold(
+        #     normalized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        #     cv2.THRESH_BINARY, 11, 10
+        # )
+        
+        gaussian = cv2.GaussianBlur(normalized, (0, 0), 2.0)
+        sharpened = cv2.addWeighted(normalized, 1.5, gaussian, -0.5, 0)
+        enhanced = cv2.convertScaleAbs(sharpened, alpha=1.2, beta=5)
+        
+        # Converte de volta para BGR (para consistência)
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
 
 def draw_contour_debug(image, contour):
@@ -218,7 +261,7 @@ def draw_contour_debug(image, contour):
         for i, pt in enumerate(pts):
             cv2.circle(debug_img, tuple(pt), 10, (0, 0, 255), -1)
             cv2.putText(debug_img, str(i), tuple(pt), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
     return debug_img
 
 
@@ -242,20 +285,28 @@ def scan_document(input_path, output_path=None, show_debug=False):
         return None
     
     print(f"📄 Processando: {input_path}")
-    print(f"   Dimensões originais: {image.shape[1]}x{image.shape[0]}px")
+    print(f"    Dimensões originais: {image.shape[1]}x{image.shape[0]}px")
     
     # Processa
     result = process_image(image)
     
     # Salva resultado
     if output_path:
-        cv2.imwrite(output_path, result)
+        cv2.imwrite(output_path, result, [cv2.IMWRITE_JPEG_QUALITY, 95])
         print(f"💾 Salvo em: {output_path}")
     
     # Mostra debug se solicitado
     if show_debug:
-        cv2.imshow("Original", cv2.resize(image, (800, 600)))
-        cv2.imshow("Digitalizado", cv2.resize(result, (800, 600)))
+        h, w = image.shape[:2]
+        ratio = 800 / max(h, w)
+        preview_orig = cv2.resize(image, None, fx=ratio, fy=ratio)
+        
+        h_res, w_res = result.shape[:2]
+        ratio_res = 800 / max(h_res, w_res)
+        preview_res = cv2.resize(result, None, fx=ratio_res, fy=ratio_res)
+
+        cv2.imshow("Original", preview_orig)
+        cv2.imshow("Digitalizado", preview_res)
         print("Pressione qualquer tecla para fechar...")
         cv2.waitKey(0)
         cv2.destroyAllWindows()
@@ -263,9 +314,23 @@ def scan_document(input_path, output_path=None, show_debug=False):
     return result
 
 
-# Uso direto:
-# resultado = process_image(cv2.imread('documento.jpg'))
-# cv2.imwrite('documento_digitalizado.jpg', resultado)
+# --- COMO USAR ---
 
-# Ou usar a função completa:
-# scan_document('documento.jpg', 'saida.jpg', show_debug=True)
+# 1. Defina os caminhos
+# Lembre-se de mudar 'documento.jpg' para o nome do seu arquivo
+arquivo_entrada = 'documento.jpg'
+arquivo_saida = 'documento_digitalizado.jpg'
+
+# 2. Execute a digitalização
+# scan_document(arquivo_entrada, arquivo_saida, show_debug=True)
+
+# Exemplo simples (se você já tiver a imagem carregada):
+# img = cv2.imread(arquivo_entrada)
+# if img is not None:
+#     resultado = process_image(img)
+#     cv2.imwrite(arquivo_saida, resultado)
+#     cv2.imshow("Resultado", cv2.resize(resultado, (800, 1000)))
+#     cv2.waitKey(0)
+#     cv2.destroyAllWindows()
+# else:
+#     print(f"Não foi possível carregar a imagem: {arquivo_entrada}")
