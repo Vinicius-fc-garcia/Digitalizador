@@ -23,6 +23,9 @@ def process_image(image):
     doc_contour = find_document_contour(image_resized)
     
     if doc_contour is None:
+        debug_img = draw_contour_debug(image_resized, doc_contour)
+        cv2.imshow("Contorno Detectado", debug_img)
+        cv2.waitKey(0)
         print("⚠️ Não foi possível detectar o documento")
         return orig
     
