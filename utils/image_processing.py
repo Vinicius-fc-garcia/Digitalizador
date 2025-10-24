@@ -14,65 +14,72 @@ def order_points(pts):
 
 def find_document_contour(image):
     """
-    ✅ CORREÇÃO: Ajustes para incluir a área de caligrafia.
-    Remove filtros de proporção e ajusta Canny/Blur/Epsilon.
+    CORREÇÃO V2: Detecta o documento COMPLETO incluindo a parte manuscrita.
+    Usa detecção de área clara (papel branco) em vez de apenas bordas.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # 1. Blur um pouco mais leve (5x5) para tentar pegar as bordas da caligrafia
+    # 1. Blur para reduzir ruído
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # 2. Canny para detecção de bordas (thresholds mais abertos para caligrafia)
-    edges = cv2.Canny(blurred, 30, 100, apertureSize=3) # Ajustado para ser mais sensível
+    # 2. MÉTODO PRINCIPAL: Detectar áreas CLARAS (papel branco)
+    # Isso pega todo o documento, incluindo onde tem caligrafia
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # 3. Encontra contornos (TODOS ELES)
-    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE) 
+    # 3. Detectar regiões claras (papel = 200-255)
+    mask_white = cv2.inRange(thresh, 180, 255)
+    
+    # 4. Operações morfológicas para UNIR todas as partes do papel
+    # Kernel grande para conectar papel impresso + manuscrito
+    kernel_large = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    mask_white = cv2.morphologyEx(mask_white, cv2.MORPH_CLOSE, kernel_large, iterations=5)
+    mask_white = cv2.dilate(mask_white, kernel_large, iterations=3)
+    
+    # 5. Remove pequenos ruídos
+    kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    mask_white = cv2.morphologyEx(mask_white, cv2.MORPH_OPEN, kernel_small, iterations=2)
+    
+    # 6. Encontra contornos da área branca
+    contours, _ = cv2.findContours(mask_white, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     if not contours:
+        print("⚠️ Nenhum contorno encontrado na máscara branca")
         return None
     
-    # 4. Ordena por área (do maior para o menor)
+    # 7. Pega o maior contorno (deve ser o documento inteiro)
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    
     img_area = image.shape[0] * image.shape[1]
     
-    # 5. Procura o melhor contorno retangular entre os maiores
-    for cnt in contours[:20]: 
+    for cnt in contours[:3]:  # Testa os 3 maiores
         area = cv2.contourArea(cnt)
         
-        if area < img_area * 0.10: 
-            break
+        # Deve ter pelo menos 20% da imagem
+        if area < img_area * 0.20:
+            continue
         
+        # Aproxima para retângulo
         peri = cv2.arcLength(cnt, True)
         
-        # 6. Tenta aproximar para um polígono (epsilon aumentado para 4-5% - mais flexível)
-        approx = cv2.approxPolyDP(cnt, 0.04 * peri, True) # Aumentado para 4%
-        
-        # 7. É um quadrilátero convexo? (Remover filtro de aspecto aqui)
-        if len(approx) == 4 and cv2.isContourConvex(approx):
-            print(f"✓ Contorno aceito. Área: {area}")
-            return approx.reshape(4, 2).astype("float32")
-
-    print("⚠️ Não foi encontrado nenhum contorno de 4 lados adequado. Tentando Fallback.")
+        # Tenta diferentes níveis de aproximação
+        for epsilon in [0.02, 0.03, 0.04, 0.05]:
+            approx = cv2.approxPolyDP(cnt, epsilon * peri, True)
+            
+            if len(approx) == 4:
+                # Verifica se é um quadrilátero razoável
+                x, y, w_cnt, h_cnt = cv2.boundingRect(approx)
+                aspect_ratio = float(w_cnt) / h_cnt
+                
+                # Documento vertical (largura < altura)
+                if 0.5 < aspect_ratio < 1.2:  # Mais flexível para incluir caligrafia
+                    print(f"✓ Contorno aceito: Área={area/img_area*100:.1f}%, Aspect={aspect_ratio:.2f}")
+                    return approx.reshape(4, 2).astype("float32")
     
-    # --- FALLBACK: Usar Morfologia, que pega o contorno maior ---
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
-    dilated = cv2.dilate(closed, kernel, iterations=2)
-    contours_fb, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours_fb: return None
-        
-    contours_fb = sorted(contours_fb, key=cv2.contourArea, reverse=True)
-    cnt_fb = contours_fb[0]
-    peri_fb = cv2.arcLength(cnt_fb, True)
-    approx_fb = cv2.approxPolyDP(cnt_fb, 0.02 * peri_fb, True)
-    
-    if len(approx_fb) == 4:
-        print("Usando contorno Fallback (com morfologia).")
-        return approx_fb.reshape(4, 2).astype("float32")
-
-    return None
+    # FALLBACK: Usa minAreaRect no maior contorno
+    print("⚠️ Usando fallback com minAreaRect")
+    cnt = contours[0]
+    rect = cv2.minAreaRect(cnt)
+    box = cv2.boxPoints(rect)
+    return box.astype("float32")
 
 def enhance_document(image):
     """
@@ -83,21 +90,21 @@ def enhance_document(image):
     else:
         gray = image.copy()
     
-    # --- 1. Remoção de Sombra e Normalização ---
+    # 1. Remoção de Sombra e Normalização
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (30, 30))
     background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
     normalized = cv2.divide(gray, background, scale=255)
     normalized = cv2.normalize(normalized, None, 0, 255, cv2.NORM_MINMAX)
     
-    # --- 2. Ajuste de Contraste (CLAHE) ---
+    # 2. Ajuste de Contraste (CLAHE)
     clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
     normalized = clahe.apply(normalized)
     
-    # --- 3. Nitidez (Unsharp Mask) ---
+    # 3. Nitidez (Unsharp Mask)
     gaussian = cv2.GaussianBlur(normalized, (0, 0), 1.0)
     sharpened = cv2.addWeighted(normalized, 1.8, gaussian, -0.8, 0)
     
-    # --- 4. Ajuste Final de Brilho/Contraste ---
+    # 4. Ajuste Final de Brilho/Contraste
     enhanced = cv2.convertScaleAbs(sharpened, alpha=1.1, beta=10)
     
     return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
@@ -105,12 +112,12 @@ def enhance_document(image):
 def process_image(image):
     """
     Digitalizador que detecta, corrige perspectiva e enquadra documentos.
-    CORREÇÃO: Margem ajustada para evitar corte lateral enquanto inclui a caligrafia.
+    INCLUI toda a área do documento, incluindo texto manuscrito.
     """
     orig = image.copy()
     h, w = image.shape[:2]
     
-    # --- 1. Redimensiona para processamento rápido ---
+    # 1. Redimensiona para processamento rápido
     max_dim = 1500
     if max(h, w) > max_dim:
         scale = max_dim / max(h, w)
@@ -120,19 +127,22 @@ def process_image(image):
         image_resized = image.copy()
         ratio = 1.0
     
-    # --- 2. Encontra o contorno do documento ---
+    # 2. Encontra o contorno do documento (COMPLETO)
     doc_contour_resized = find_document_contour(image_resized)
     
     if doc_contour_resized is None:
+        print("❌ Não foi possível detectar o documento")
         return orig 
     
+    # 3. Ajusta para escala original
     doc_contour_orig = doc_contour_resized / ratio
     pts = order_points(doc_contour_orig)
     (tl, tr, br, bl) = pts
     
-    # MARGEM AJUSTADA: 25px é um bom meio-termo
-    margin = 25 
+    # 4. Margem pequena (10px) para não cortar nada
+    margin = 10
     
+    # 5. Calcula dimensões do documento
     widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
     widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
     maxWidth = max(int(widthA), int(widthB)) + 2 * margin
@@ -141,7 +151,7 @@ def process_image(image):
     heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
     maxHeight = max(int(heightA), int(heightB)) + 2 * margin
     
-    # --- 5. Define o destino retangular para a transformação com a margem ---
+    # 6. Define o destino retangular com margem
     dst = np.array([
         [margin, margin],
         [maxWidth - 1 - margin, margin],
@@ -149,18 +159,18 @@ def process_image(image):
         [margin, maxHeight - 1 - margin]
     ], dtype="float32")
     
-    # --- 6. Aplica a transformação de perspectiva ---
+    # 7. Aplica a transformação de perspectiva
     M = cv2.getPerspectiveTransform(pts, dst)
     warped = cv2.warpPerspective(orig, M, (maxWidth, maxHeight))
     
-    # --- 7. Pós-processamento ---
+    # 8. Pós-processamento
     warped = enhance_document(warped)
     
-    print(f"✓ Documento digitalizado: {maxWidth}x{maxHeight}px (Margem de {margin}px aplicada)")
+    print(f"✓ Documento digitalizado: {maxWidth}x{maxHeight}px (Margem: {margin}px)")
     return warped
 
-# --- Funções de Debug (Manter) ---
 def draw_contour_debug(image, contour_points, color=(0, 255, 0), thickness=3, show_corners=True):
+    """Desenha o contorno detectado para debug."""
     debug_img = image.copy()
     if contour_points is not None:
         pts = np.int32(contour_points)
@@ -174,47 +184,74 @@ def draw_contour_debug(image, contour_points, color=(0, 255, 0), thickness=3, sh
     return debug_img
 
 def scan_document(input_path, output_path=None, show_debug=False):
+    """
+    Função completa para escanear um documento.
+    
+    Args:
+        input_path: Caminho da imagem de entrada
+        output_path: Caminho para salvar (opcional)
+        show_debug: Se True, mostra imagem com contorno detectado
+    
+    Returns:
+        Imagem digitalizada
+    """
     image = cv2.imread(input_path)
     if image is None:
         print(f"❌ Erro ao carregar: {input_path}")
         return None
     
-    print(f"📄 Processando: {input_path}")
+    print(f"\n📄 Processando: {input_path}")
+    print(f"   Dimensões originais: {image.shape[1]}x{image.shape[0]}px")
     
+    # Processamento
     result = process_image(image)
     
+    # Salva resultado
     if output_path:
         cv2.imwrite(output_path, result, [cv2.IMWRITE_JPEG_QUALITY, 95])
         print(f"💾 Salvo em: {output_path}")
     
+    # Mostra debug se solicitado
     if show_debug:
+        # Prepara imagem para debug
         temp_h, temp_w = image.shape[:2]
         max_dim_debug = 800
         scale_debug = max_dim_debug / max(temp_h, temp_w)
         image_resized_debug = cv2.resize(image, None, fx=scale_debug, fy=scale_debug, interpolation=cv2.INTER_AREA)
         
+        # Detecta e desenha contorno
         doc_contour_for_debug = find_document_contour(image_resized_debug)
         if doc_contour_for_debug is not None:
             doc_contour_for_debug = order_points(doc_contour_for_debug)
             debug_contour_img = draw_contour_debug(image_resized_debug, doc_contour_for_debug)
-            cv2.imshow("Contorno Detectado (Debug - 0:TL, 1:TR, 2:BR, 3:BL)", debug_contour_img)
+            cv2.imshow("1. Contorno Detectado (0:TL, 1:TR, 2:BR, 3:BL)", debug_contour_img)
         
+        # Mostra resultado
         h_res, w_res = result.shape[:2]
         ratio_res_display = min(800 / w_res, 800 / h_res)
         preview_res = cv2.resize(result, None, fx=ratio_res_display, fy=ratio_res_display, interpolation=cv2.INTER_AREA)
-
-        cv2.imshow("Digitalizado (Resultado Final)", preview_res)
-        print("Pressione qualquer tecla para fechar...")
+        cv2.imshow("2. Documento Digitalizado (Resultado Final)", preview_res)
+        
+        print("\n✓ Janelas abertas. Pressione qualquer tecla para fechar...")
         cv2.waitKey(0)
         cv2.destroyAllWindows()
     
     return result
 
 
-# --- COMO USAR ---
-# 1. Certifique-se de que a imagem original está salva como 'documento.jpg'
-arquivo_entrada = 'documento.jpg' 
-arquivo_saida = 'documento_digitalizado_caligrafia_final.jpg'
+# ============================================================================
+# COMO USAR
+# ============================================================================
 
-# 2. Execute com show_debug=True para ver o contorno detectado
-scan_document(arquivo_entrada, arquivo_saida, show_debug=True)
+# Opção 1: Uso simples
+# img = cv2.imread('documento.jpg')
+# resultado = process_image(img)
+# cv2.imwrite('documento_digitalizado.jpg', resultado)
+
+# Opção 2: Uso completo com debug
+# scan_document('documento.jpg', 'documento_digitalizado.jpg', show_debug=True)
+
+# Opção 3: Processar múltiplos arquivos
+# import glob
+# for arquivo in glob.glob('*.jpg'):
+#     scan_document(arquivo, f'digitalizado_{arquivo}', show_debug=False)
