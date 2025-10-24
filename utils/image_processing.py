@@ -19,12 +19,12 @@ def process_image(image):
         image_resized = image.copy()
         ratio = 1.0
     
+    print("Procurando contorno do documento...")
     # --- 2. Encontra o contorno do documento ---
     doc_contour_resized = find_document_contour(image_resized)
     
     if doc_contour_resized is None:
         print("⚠️ Não foi possível detectar um contorno de documento claro. Retornando a imagem original.")
-        # Se nenhum contorno for detectado, retorne a imagem original
         return orig 
     
     # Ajusta o contorno para a escala original da imagem
@@ -36,12 +36,10 @@ def process_image(image):
     # --- 4. Calcula as dimensões do documento retificado ---
     (tl, tr, br, bl) = pts
     
-    # Calcula a largura máxima
     widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
     widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
     maxWidth = max(int(widthA), int(widthB))
     
-    # Calcula a altura máxima
     heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
     heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
     maxHeight = max(int(heightA), int(heightB))
@@ -58,8 +56,8 @@ def process_image(image):
     M = cv2.getPerspectiveTransform(pts, dst)
     warped = cv2.warpPerspective(orig, M, (maxWidth, maxHeight))
     
-    # --- 7. Pós-processamento para melhorar qualidade ---
-    warped = enhance_document(warped)
+    # --- 7. Pós-processamento para melhorar qualidade (foco em impressão) ---
+    warped = enhance_document_for_print(warped)
     
     print(f"✓ Documento digitalizado: {maxWidth}x{maxHeight}px")
     return warped
@@ -67,164 +65,129 @@ def process_image(image):
 
 def find_document_contour(image):
     """
-    Detecta o contorno do documento usando múltiplas técnicas.
-    Retorna os 4 cantos do documento.
+    ✅ CORRIGIDO: Detecta o contorno do documento (papel) e não da prancheta.
+    Remove operações de morfologia que fundiam os contornos.
+    Usa RETR_LIST para encontrar todos os contornos e filtra pelo melhor candidato.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # --- Pré-processamento avançado ---
-    # Suaviza a imagem mantendo as bordas (útil para ruído sem perder detalhes)
-    blurred = cv2.bilateralFilter(gray, 11, 17, 17) 
+    # 1. Blur para reduzir ruído de textura e texto
+    # Um blur maior é melhor para ignorar o texto dentro da nota
+    blurred = cv2.GaussianBlur(gray, (9, 9), 0)
     
-    # Melhora contraste com CLAHE
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    blurred = clahe.apply(blurred)
-
-    # Canny para detecção de bordas
-    edges = cv2.Canny(blurred, 75, 200, apertureSize=3) # Ajuste de thresholds Canny
-
-    # --- Operações Morfológicas para fechar gaps e limpar ruído ---
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10)) # Kernel maior
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3) # Mais iterações
-    dilated = cv2.dilate(closed, kernel, iterations=2) # Dilata para conectar ainda mais
-
-    # Encontra contornos na imagem processada
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 2. Canny para detecção de bordas
+    edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
+    
+    # 3. Encontra contornos (TODOS ELES, não só o externo)
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE) # MUDANÇA: RETR_LIST
     
     if not contours:
+        print("Canny não encontrou contornos.")
         return None
     
-    # Ordena por área (do maior para o menor)
+    # 4. Ordena por área (do maior para o menor)
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
     
     img_area = image.shape[0] * image.shape[1]
     
-    # Procura o melhor contorno retangular entre os maiores
-    for cnt in contours[:10]: # Aumenta para testar mais contornos
+    # 5. Procura o melhor contorno retangular entre os maiores
+    print(f"Encontrados {len(contours)} contornos. Testando os 20 maiores...")
+    for cnt in contours[:20]: # Aumenta para testar mais contornos
         area = cv2.contourArea(cnt)
         
-        # Filtra contornos muito pequenos ou muito grandes (ruído/borda da imagem)
-        if area < img_area * 0.15 or area > img_area * 0.95: # Documento deve ocupar entre 15% e 95% da imagem
-            continue
+        # Filtro de área (importante)
+        # O documento deve ter pelo menos 10% da área da imagem
+        if area < img_area * 0.10: 
+            break # Como estão ordenados, não há maiores
         
         peri = cv2.arcLength(cnt, True)
         
-        # Tenta diferentes níveis de aproximação para encontrar 4 pontos
-        # Variação de epsilon pode ser crucial aqui
-        for epsilon_factor in [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]: 
-            approx = cv2.approxPolyDP(cnt, epsilon_factor * peri, True)
-            
-            if len(approx) == 4:
-                # É um quadrilátero com 4 pontos
-                # Verificações adicionais: ângulo e convexidade
-                if cv2.isContourConvex(approx):
-                    # Também podemos verificar a relação de aspecto aqui para evitar contornos muito finos
-                    x, y, w_cnt, h_cnt = cv2.boundingRect(approx)
-                    aspect_ratio = float(w_cnt)/h_cnt
-                    if 0.5 < aspect_ratio < 2.0: # Relação de aspecto razoável para um documento
-                        return approx.reshape(4, 2).astype("float32")
-                # Se não for convexo ou a proporção não for boa, mas ainda tem 4 pontos
-                # Podemos retornar como um fallback, mas a preferência é pelo convexo e bom aspecto
-                # return approx.reshape(4, 2).astype("float32") # Comentei para focar no mais robusto
-                
-    # Fallback: se não encontrou um contorno de 4 pontos bom, 
-    # usa o maior contorno e tenta obter um retângulo a partir dele.
-    if contours:
-        cnt = contours[0] # Maior contorno
-        rect = cv2.minAreaRect(cnt)
-        box = cv2.boxPoints(rect)
-        return box.astype("float32")
+        # 6. Tenta aproximar para um polígono
+        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True) # Epsilon 2%
         
+        # 7. É um quadrilátero?
+        if len(approx) == 4:
+            # É convexo? (Evita formas em "C" ou "X")
+            if cv2.isContourConvex(approx):
+                print(f"✓ Encontrado candidato de 4 lados com área {area}")
+                return approx.reshape(4, 2).astype("float32")
+            else:
+                print(f"Candidato de 4 lados rejeitado (não convexo). Área: {area}")
+
+    print("⚠️ Não foi encontrado nenhum contorno de 4 lados adequado.")
+    
+    # --- FALLBACK: Se o Canny puro falhar, tenta o método antigo (com morfologia)
+    # Isso pode pegar o holder, mas é melhor que nada.
+    print("Tentando fallback com morfologia...")
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
+    dilated = cv2.dilate(closed, kernel, iterations=2)
+    contours_fb, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours_fb:
+        print("Fallback também falhou.")
+        return None
+        
+    contours_fb = sorted(contours_fb, key=cv2.contourArea, reverse=True)
+    cnt_fb = contours_fb[0]
+    peri_fb = cv2.arcLength(cnt_fb, True)
+    approx_fb = cv2.approxPolyDP(cnt_fb, 0.02 * peri_fb, True)
+    
+    if len(approx_fb) == 4:
+        print("Usando fallback (com morfologia, RETR_EXTERNAL).")
+        return approx_fb.reshape(4, 2).astype("float32")
+
+    print("Fallback final falhou. Nenhum contorno de 4 lados encontrado.")
     return None
 
 
 def order_points(pts):
     """
     Ordena pontos: top-left, top-right, bottom-right, bottom-left.
-    Mais robusto contra rotações.
     """
     rect = np.zeros((4, 2), dtype="float32")
-
-    # Os pontos com a menor soma (x+y) é o top-left
-    # Os pontos com a maior soma (x+y) é o bottom-right
+    
     s = pts.sum(axis=1)
     rect[0] = pts[np.argmin(s)]
     rect[2] = pts[np.argmax(s)]
-
-    # Os pontos com a menor diferença (x-y) é o top-right
-    # Os pontos com a maior diferença (x-y) é o bottom-left
+    
     diff = np.diff(pts, axis=1)
     rect[1] = pts[np.argmin(diff)]
     rect[3] = pts[np.argmax(diff)]
-
+    
     return rect
 
 
-def enhance_document(image):
+def enhance_document_for_print(image):
     """
-    Melhora a qualidade do documento digitalizado.
-    Remove sombras, aumenta contraste e nitidez.
-    Preserva a cor se o original for colorido.
+    ✅ CORRIGIDO: Melhora a qualidade focado em IMPRESSÃO.
+    Converte para P&B de alto contraste (Binarização Adaptativa).
+    Isso força o texto a ficar preto e o fundo branco.
     """
+    print("Aplicando filtro de binarização para impressão...")
     
-    # Se for colorido, processa o canal de Luminosidade (L)
-    if len(image.shape) == 3 and image.shape[2] == 3:
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        
-        # Remove sombras do canal L
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (30, 30)) # Kernel ligeiramente maior
-        background = cv2.morphologyEx(l, cv2.MORPH_CLOSE, kernel)
-        l_normalized = cv2.divide(l, background, scale=255)
-        
-        # Aumenta contraste do canal L
-        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(10, 10)) # Limite e grid maiores
-        l_enhanced = clahe.apply(l_normalized)
-        
-        # Aplica nitidez no canal L
-        gaussian_l = cv2.GaussianBlur(l_enhanced, (0, 0), 2.5) # Sigma maior
-        l_sharpened = cv2.addWeighted(l_enhanced, 1.8, gaussian_l, -0.8, 0) # Pesos mais agressivos
-
-        # Ajuste final de brilho/contraste no canal L
-        l_final = cv2.convertScaleAbs(l_sharpened, alpha=1.1, beta=10) # Alpha e Beta ajustados
-        
-        # Mescla canais de volta
-        merged = cv2.merge((l_final, a, b))
-        final_color = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-        
-        # --- OPÇÃO PARA IMPRESSÃO (PRETO E BRANCO) ---
-        # Descomente as linhas abaixo para um documento P&B de alto contraste
-        # print("Convertendo para P&B de alto contraste para impressão.")
-        # gray_final = cv2.cvtColor(final_color, cv2.COLOR_BGR2GRAY)
-        # _, final_bw = cv2.threshold(gray_final, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # return cv2.cvtColor(final_bw, cv2.COLOR_GRAY2BGR) # Converte de volta para 3 canais BGR para consistência
-            
-        return final_color
-        
+    # Converte para escala de cinza
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
-        # Se já for P&B, usa a lógica de cinza
         gray = image.copy()
-        if len(gray.shape) == 3:
-            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
-            
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (30, 30))
-        background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-        normalized = cv2.divide(gray, background, scale=255)
-        normalized = cv2.normalize(normalized, None, 0, 255, cv2.NORM_MINMAX)
-        
-        # --- OPÇÃO PARA IMPRESSÃO (PRETO E BRANCO) ---
-        # Descomente para P&B de alto contraste
-        # print("Convertendo para P&B de alto contraste para impressão.")
-        # normalized = cv2.adaptiveThreshold(
-        #     normalized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        #     cv2.THRESH_BINARY, 11, 10
-        # )
-        
-        gaussian = cv2.GaussianBlur(normalized, (0, 0), 2.5)
-        sharpened = cv2.addWeighted(normalized, 1.8, gaussian, -0.8, 0)
-        enhanced = cv2.convertScaleAbs(sharpened, alpha=1.1, beta=10)
-        
-        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+    
+    # Suaviza levemente para remover ruído antes da binarização
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    
+    # Binarização adaptativa: calcula o limiar para pequenas regiões.
+    # Isso é excelente para texto em fundos com iluminação irregular.
+    binary = cv2.adaptiveThreshold(
+        blurred, 
+        255, # Valor máximo (branco)
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, # Método
+        cv2.THRESH_BINARY, # Tipo: texto preto, fundo branco
+        15, # Tamanho do bloco (pequeno para capturar detalhes do texto)
+        7   # C: Constante subtraída da média
+    )
+    
+    # Converte de volta para BGR (3 canais) para consistência no salvamento
+    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
 
 
 def draw_contour_debug(image, contour_points, color=(0, 255, 0), thickness=3, show_corners=True):
@@ -233,15 +196,12 @@ def draw_contour_debug(image, contour_points, color=(0, 255, 0), thickness=3, sh
     """
     debug_img = image.copy()
     if contour_points is not None:
-        # Garante que os pontos são inteiros para o drawing
         pts = np.int32(contour_points)
         cv2.polylines(debug_img, [pts], True, color, thickness)
         
         if show_corners:
-            # Desenha círculos nos cantos e numera
             for i, pt in enumerate(pts):
                 cv2.circle(debug_img, tuple(pt.flatten()), 10, (0, 0, 255), -1) # Canto vermelho
-                # Adiciona texto para identificar os cantos (0: TL, 1: TR, 2: BR, 3: BL)
                 cv2.putText(debug_img, str(i), tuple(pt.flatten()), 
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
     return debug_img
@@ -251,14 +211,6 @@ def draw_contour_debug(image, contour_points, color=(0, 255, 0), thickness=3, sh
 def scan_document(input_path, output_path=None, show_debug=False):
     """
     Função completa para escanear um documento.
-    
-    Args:
-        input_path: Caminho da imagem de entrada
-        output_path: Caminho para salvar (opcional)
-        show_debug: Se True, mostra imagem com contorno detectado e resultado final
-    
-    Returns:
-        Imagem digitalizada
     """
     image = cv2.imread(input_path)
     if image is None:
@@ -284,10 +236,12 @@ def scan_document(input_path, output_path=None, show_debug=False):
         # Tenta encontrar o contorno apenas para visualização de debug
         doc_contour_for_debug = find_document_contour(image_resized_debug)
         if doc_contour_for_debug is not None:
+            # Ordena os pontos de debug para desenhar os números corretamente
+            doc_contour_for_debug = order_points(doc_contour_for_debug)
             debug_contour_img = draw_contour_debug(image_resized_debug, doc_contour_for_debug)
             cv2.imshow("Contorno Detectado (Debug)", debug_contour_img)
         else:
-            cv2.imshow("Contorno Detectado (Debug)", image_resized_debug) # Mostra a imagem redimensionada se não achou contorno
+            cv2.imshow("Contorno Detectado (Debug)", image_resized_debug) 
             print("Não foi possível desenhar o contorno de debug.")
 
     # --- Processamento principal ---
@@ -295,18 +249,21 @@ def scan_document(input_path, output_path=None, show_debug=False):
     
     # Salva resultado
     if output_path:
-        # cv2.IMWRITE_JPEG_QUALITY, 95 garante boa qualidade para JPEG
-        cv2.imwrite(output_path, result, [cv2.IMWRITE_JPEG_QUALITY, 95]) 
+        # Salva como PNG para evitar compressão JPEG em imagem P&B
+        # ou usa JPEG com qualidade alta
+        if ".png" in output_path.lower():
+             cv2.imwrite(output_path, result) 
+        else:
+             cv2.imwrite(output_path, result, [cv2.IMWRITE_JPEG_QUALITY, 95])
         print(f"💾 Salvo em: {output_path}")
     
     # Mostra debug se solicitado
     if show_debug:
         h_res, w_res = result.shape[:2]
-        # Redimensiona o resultado para caber na tela mantendo a proporção
-        ratio_res_display = min(800 / w_res, 800 / h_res) # Adaptação para caber em 800x800
+        ratio_res_display = min(800 / w_res, 800 / h_res) 
         preview_res = cv2.resize(result, None, fx=ratio_res_display, fy=ratio_res_display, interpolation=cv2.INTER_AREA)
 
-        cv2.imshow("Original (Reduzido)", image_resized_debug) # Mostra original reduzido
+        cv2.imshow("Original (Reduzido)", image_resized_debug) 
         cv2.imshow("Digitalizado (Resultado Final)", preview_res)
         print("Pressione qualquer tecla para fechar...")
         cv2.waitKey(0)
@@ -317,13 +274,10 @@ def scan_document(input_path, output_path=None, show_debug=False):
 
 # --- COMO USAR ---
 
-# 1. Salve a imagem que você enviou como 'documento.jpg' no mesmo diretório
-# 2. Descomente a linha abaixo para executar
-arquivo_entrada = 'documento.jpg' # Certifique-se que o nome do arquivo está correto
-arquivo_saida = 'documento_digitalizado.jpg'
+# 1. Salve a imagem original como 'documento.jpg'
+# 2. Defina o nome do arquivo de saída
+arquivo_entrada = 'documento.jpg' # Use o nome da sua imagem original
+arquivo_saida = 'documento_digitalizado_v2.jpg'
 
-# Chame a função scan_document com show_debug=True para ver o processo
+# 3. Execute com show_debug=True
 scan_document(arquivo_entrada, arquivo_saida, show_debug=True)
-
-# Ou, se preferir apenas processar e salvar (sem debug visual):
-# scan_document(arquivo_entrada, arquivo_saida, show_debug=False)
